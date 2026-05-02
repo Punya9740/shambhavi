@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprints
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'name', 'role', 'onboarded', 'createdAt', 'updatedAt'])
+        && data.keys().size() == 7
+        && data.uid == request.auth.uid
+        && data.email == request.auth.token.email
+        && data.name is string && data.name.size() <= 100
+        && data.role in ['patient', 'doctor']
+        && data.onboarded is bool
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isValidPatient(data) {
+      return data.keys().hasAll(['bloodGroup', 'gender', 'age', 'address'])
+        && data.bloodGroup is string && data.bloodGroup.size() <= 5
+        && data.gender is string && data.gender.size() <= 20
+        && data.age is number && data.age >= 0 && data.age <= 150
+        && data.address is string && data.address.size() <= 500;
+    }
+
+    function isValidDoctor(data) {
+      return data.keys().hasAll(['degree', 'address'])
+        && data.degree is string && data.degree.size() <= 200
+        && data.address is string && data.address.size() <= 500;
+    }
+
+    // Collection Rules
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) 
+        && (
+          // Action: Onboarding Complete
+          (incoming().onboarded == true && existing().onboarded == false && incoming().diff(existing()).affectedKeys().hasOnly(['onboarded', 'updatedAt']))
+          || (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt']))
+        )
+        && incoming().updatedAt == request.time;
+    }
+
+    match /patients/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidPatient(incoming())
+        && get(/databases/$(database)/documents/users/$(userId)).data.role == 'patient';
+      allow update: if isOwner(userId) && isValidPatient(incoming());
+    }
+
+    match /doctors/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidDoctor(incoming())
+        && get(/databases/$(database)/documents/users/$(userId)).data.role == 'doctor';
+      allow update: if isOwner(userId) && isValidDoctor(incoming());
+    }
+  }
+}
